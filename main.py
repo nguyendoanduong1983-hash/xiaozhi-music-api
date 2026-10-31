@@ -230,3 +230,31 @@ def inspect_formats(q: str):
         except Exception as e:
             results['soundcloud_err'] = str(e)
     return results
+
+@app.get('/test_yt')
+def test_yt_clients(q: str):
+    res = {}
+    clients = ['mweb', 'android_music', 'web_creator', 'tv_embedded']
+    for c in clients:
+        opts = {
+            'quiet': True,
+            'skip_download': True,
+            'extractor_args': {'youtube': {'player_client': [c]}}
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f'ytsearch1:{q}', download=False)
+                if info and 'entries' in info and len(info['entries']) > 0:
+                    v = info['entries'][0]
+                    res[c] = {
+                        'title': v.get('title'),
+                        'formats': len(v.get('formats', [])),
+                        'progressive': [
+                            {'id': f.get('format_id'), 'ext': f.get('ext'), 'proto': f.get('protocol'), 'abr': f.get('abr'), 'url': f.get('url')[:60]}
+                            for f in v.get('formats', [])
+                            if f.get('protocol') in ['http', 'https'] and 'm3u8' not in (f.get('protocol') or '') and '.m3u8' not in (f.get('url') or '')
+                        ]
+                    }
+        except Exception as e:
+            res[c] = {'error': str(e)}
+    return res
