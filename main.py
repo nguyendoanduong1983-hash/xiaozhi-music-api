@@ -6,33 +6,32 @@ import urllib.parse
 import json
 import logging
 import re
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xiaozhi-music-api")
 
 app = FastAPI(
     title="Xiaozhi Music API",
-    description="API bóc tách và cung cấp luồng âm thanh liên tục (HTTP Progressive Stream) cho ESP32",
-    version="2.1.0"
+    description="API trích xuất luồng âm thanh liên tục (HTTP Progressive Stream) tối ưu cho vi điều khiển ESP32",
+    version="2.2.0"
 )
 
-# Cấu hình yt-dlp cho YouTube: Ưu tiên HTTP/HTTPS trực tiếp, bài trừ hoàn toàn m3u8/HLS
+# Cấu hình yt-dlp cho YouTube: Không ép format cố định ở cấp options để tránh DownloadError
 YDL_OPTS_YT = {
-    "format": "bestaudio[protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[protocol^=http][protocol!*=m3u8]",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
     "extractor_args": {
         "youtube": {
-            "player_client": ["ios", "tv_embedded", "mweb"]
+            "player_client": ["android", "ios", "tv_embedded", "mweb"]
         }
     }
 }
 
-# Cấu hình yt-dlp cho SoundCloud: Ưu tiên progressive http_mp3, loại trừ m3u8
+# Cấu hình yt-dlp cho SoundCloud: Lấy toàn bộ formats để phân tích và lọc bằng code
 YDL_OPTS_SC = {
-    "format": "http_mp3/bestaudio[protocol^=http][protocol!*=m3u8]/best[protocol^=http][protocol!*=m3u8]",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -98,17 +97,19 @@ def find_best_progressive_audio(formats: list) -> dict:
 
         # Ưu tiên audio-only (không tốn băng thông video)
         if vcodec == "none":
-            score += 30
+            score += 40
 
-        # Ưu tiên bitrate nhẹ 64k - 160k
+        # Ưu tiên bitrate nhẹ 64k - 160k cho ESP32
         try:
             abr_val = float(abr)
             if 64 <= abr_val <= 160:
                 score += 30
             elif abr_val < 64:
                 score += 15
-            elif abr_val > 160:
-                score += 5
+            elif 160 < abr_val <= 320:
+                score += 10
+            else:
+                score += 0
         except (ValueError, TypeError):
             score += 10
 
@@ -125,9 +126,46 @@ def get_hls_fallback_url(formats: list) -> str:
     """Tìm luồng HLS m3u8 tốt nhất để làm nguồn cho bộ chuyển đổi stream proxy nếu không có progressive direct link"""
     for f in formats:
         url = f.get("url", "")
-        if url and (".m3u8" in url or "m3u8" in (f.get("protocol") or "")):
+        proto = f.get("protocol") or ""
+        if url and (".m3u8" in url or "m3u8" in proto):
             return url
     return None
+
+def resolve_all_m3u8_chunks(m3u8_url: str, depth: int = 0) -> list:
+    """Tải và bóc tách các phân đoạn audio chunk từ file m3u8 (kể cả master playlist)"""
+    if depth > 3:
+        return []
+    try:
+        req = urllib.request.Request(m3u8_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+
+        base_url = m3u8_url.rsplit("/", 1)[0] + "/"
+        lines = [l.strip() for l in content.splitlines() if l.strip() and not l.startswith("#")]
+
+        if not lines:
+            return []
+
+        # Kiểm tra nếu là Master Playlist chứa danh sách sub-playlist
+        if any(line.endswith(".m3u8") for line in lines):
+            for line in lines:
+                if line.endswith(".m3u8"):
+                    sub_url = line if line.startswith("http") else base_url + line
+                    chunks = resolve_all_m3u8_chunks(sub_url, depth + 1)
+                    if chunks:
+                        return chunks
+
+        # Là Media Playlist chứa các chunk rời rạc
+        chunks = []
+        for line in lines:
+            if line.startswith("http"):
+                chunks.append(line)
+            else:
+                chunks.append(base_url + line)
+        return chunks
+    except Exception as e:
+        logger.error(f"Error resolving m3u8 chunks: {e}")
+        return []
 
 def stream_hls_to_progressive(m3u8_url: str):
     """
@@ -136,37 +174,23 @@ def stream_hls_to_progressive(m3u8_url: str):
     và bơm dòng byte âm thanh liên tục (chunked progressive stream) về ESP32.
     ESP32 chỉ việc nhận dòng byte âm thanh đơn lẻ và phát ngay, hoàn toàn không cần tải m3u8!
     """
-    try:
-        # Tải nội dung file m3u8 playlist
-        req = urllib.request.Request(m3u8_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            playlist_content = resp.read().decode("utf-8", errors="ignore")
+    chunks = resolve_all_m3u8_chunks(m3u8_url)
+    if not chunks:
+        logger.warning("No chunks found in m3u8 playlist")
+        return
 
-        # Bóc tách các URL chunk rời rạc
-        base_url = m3u8_url.rsplit("/", 1)[0] + "/"
-        chunk_urls = []
-        for line in playlist_content.splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                if line.startswith("http"):
-                    chunk_urls.append(line)
-                else:
-                    chunk_urls.append(base_url + line)
-
-        # Truyền liên tục từng chunk audio về cho ESP32
-        for chunk_url in chunk_urls:
-            try:
-                c_req = urllib.request.Request(chunk_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(c_req, timeout=10) as c_resp:
-                    while True:
-                        data = c_resp.read(16384)
-                        if not data:
-                            break
-                        yield data
-            except Exception as ce:
-                logger.warning(f"Error streaming chunk: {ce}")
-    except Exception as e:
-        logger.error(f"Error in stream_hls_to_progressive: {e}")
+    logger.info(f"Streaming {len(chunks)} audio chunks continuously to client...")
+    for chunk_url in chunks:
+        try:
+            c_req = urllib.request.Request(chunk_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(c_req, timeout=10) as c_resp:
+                while True:
+                    data = c_resp.read(16384)
+                    if not data:
+                        break
+                    yield data
+        except Exception as ce:
+            logger.warning(f"Error streaming chunk {chunk_url}: {ce}")
 
 def extract_music(query: str, request: Request = None):
     """
@@ -211,7 +235,7 @@ def extract_music(query: str, request: Request = None):
                 v = info["entries"][0]
                 formats = v.get("formats", [])
 
-                # 2.1 Tìm format progressive (ví dụ http_mp3_128)
+                # 2.1 Tìm format progressive (ví dụ direct http_mp3)
                 best_fmt = find_best_progressive_audio(formats)
                 if best_fmt and best_fmt.get("url"):
                     return {
@@ -255,7 +279,7 @@ def home():
     return {
         "status": "online",
         "service": "Xiaozhi Music API",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "stream_type": "HTTP Progressive Stream (No HLS / No m3u8 for ESP32)",
         "endpoints": {
             "play_json": "/play?q=tên_bài_hát",
@@ -319,6 +343,5 @@ def stream_audio(m3u8: str = Query(..., description="URL nguồn HLS")):
 
 if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
