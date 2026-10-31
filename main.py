@@ -150,3 +150,22 @@ if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+@app.get('/debug')
+def debug_extract(q: str):
+    import traceback
+    search_query = f'ytsearch1:{q}'
+    logs = {}
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            logs['info_keys'] = list(info.keys()) if info else None
+            logs['entries_len'] = len(info.get('entries', [])) if info else 0
+            if info and 'entries' in info and len(info['entries']) > 0:
+                e = info['entries'][0]
+                logs['first_title'] = e.get('title')
+                logs['has_url'] = bool(e.get('url'))
+    except Exception as e:
+        logs['ytdlp_error'] = str(e)
+        logs['traceback'] = traceback.format_exc()
+    return logs
