@@ -214,3 +214,19 @@ if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+@app.get('/inspect')
+def inspect_formats(q: str):
+    results = {}
+    with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+        try:
+            info = ydl.extract_info(f'scsearch1:{q}', download=False)
+            if info and 'entries' in info and len(info['entries']) > 0:
+                fmts = info['entries'][0].get('formats', [])
+                results['soundcloud'] = [
+                    {'id': f.get('format_id'), 'proto': f.get('protocol'), 'ext': f.get('ext'), 'abr': f.get('abr'), 'url': f.get('url')[:60]}
+                    for f in fmts
+                ]
+        except Exception as e:
+            results['soundcloud_err'] = str(e)
+    return results
