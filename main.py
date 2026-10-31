@@ -8,13 +8,14 @@ logger = logging.getLogger("xiaozhi-music-api")
 
 app = FastAPI(
     title="Xiaozhi Music API",
-    description="API tìm kiếm và bóc tách stream âm thanh YouTube cho ESP32 Xiaozhi Robot",
-    version="1.2.0"
+    description="API tìm kiếm và bóc tách luồng HTTP Progressive Stream (MP3/AAC) cho ESP32",
+    version="2.0.0"
 )
 
-# Cấu hình yt-dlp dùng client ios / tv_embedded để bypass bot-detection trên datacenter
+# Cấu hình yt-dlp: Yêu cầu lấy luồng HTTP/HTTPS trực tiếp, bài trừ hoàn toàn HLS (m3u8)
 YDL_OPTS_YT = {
-    "format": "bestaudio/best",
+    # Ưu tiên audio http/https trực tiếp, loại bỏ protocol chứa m3u8
+    "format": "bestaudio[protocol^=http][protocol!*=m3u8]/best[protocol^=http][protocol!*=m3u8]",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -27,52 +28,140 @@ YDL_OPTS_YT = {
 }
 
 YDL_OPTS_SC = {
-    "format": "bestaudio/best",
+    # Với SoundCloud: ép lấy http_mp3_128, loại bỏ hoàn toàn hls_opus / hls_aac / m3u8
+    "format": "http_mp3/bestaudio[protocol^=http][protocol!*=m3u8]/best[protocol^=http][protocol!*=m3u8]",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
 }
 
+def find_best_progressive_audio(formats: list) -> dict:
+    """
+    Duyệt danh sách 'formats' để lọc ra URL HTTP Progressive Stream đơn lẻ:
+    1. Loại bỏ 100% các định dạng playlist HLS (m3u8, m3u8_native), DASH (mpd).
+    2. Ưu tiên tuyệt đối: MP3 > AAC/M4A > WebM/Opus.
+    3. Ưu tiên bitrate nhẹ (64kbps - 160kbps) tối ưu cho ESP32 không bị tràn RAM.
+    """
+    if not formats:
+        return None
+
+    candidates = []
+    for f in formats:
+        url = f.get("url", "")
+        proto = (f.get("protocol") or "").lower()
+        ext = (f.get("ext") or "").lower()
+        fmt_id = (f.get("format_id") or "").lower()
+        abr = f.get("abr") or f.get("tbr") or 128
+        acodec = (f.get("acodec") or "").lower()
+        vcodec = (f.get("vcodec") or "none").lower()
+
+        # Bỏ qua nếu không có URL hoặc không phải HTTP/HTTPS
+        if not url or not url.startswith("http"):
+            continue
+
+        # LOẠI BỎ TRIỆT ĐỂ: m3u8, hls, dash manifest
+        if any(h in proto for h in ["m3u8", "hls", "dash", "f4m", "rtmp"]):
+            continue
+        if ".m3u8" in url or "playlist" in url or ".mpd" in url:
+            continue
+
+        # Bỏ qua format không có audio
+        if acodec == "none":
+            continue
+
+        # Chấm điểm ưu tiên định dạng
+        score = 0
+
+        # Ưu tiên số 1: MP3 nguyên bản (ESP32 giải mã mượt mà nhất)
+        if ext == "mp3" or "mp3" in fmt_id or "mp3" in acodec:
+            score += 100
+        # Ưu tiên số 2: M4A / AAC
+        elif ext in ["m4a", "aac"] or "aac" in acodec or "mp4a" in acodec:
+            score += 80
+        # Ưu tiên số 3: WebM / Opus
+        elif ext in ["webm", "ogg"] or "opus" in acodec:
+            score += 40
+        else:
+            score += 20
+
+        # Ưu tiên luồng thuần Audio (không kèm video để tiết kiệm băng thông)
+        if vcodec == "none":
+            score += 30
+
+        # Ưu tiên bitrate nhẹ 64kbps - 160kbps (rất vừa vặn cho RAM ESP32)
+        try:
+            abr_val = float(abr)
+            if 64 <= abr_val <= 160:
+                score += 30
+            elif abr_val < 64:
+                score += 15
+            elif abr_val > 160:
+                score += 5
+        except (ValueError, TypeError):
+            score += 10
+
+        candidates.append((score, abr, f))
+
+    if not candidates:
+        return None
+
+    # Sắp xếp candidate điểm cao nhất lên đầu
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_fmt = candidates[0][2]
+    return best_fmt
+
 def extract_music(query: str):
-    """Tìm kiếm YouTube (client iOS/TV), nếu lỗi thì fallback sang SoundCloud"""
-    # 1. Thử YouTube qua client iOS / TV embedded
+    """
+    Tìm kiếm và bóc tách luồng Progressive Stream (MP3/AAC):
+    Thử YouTube (client iOS/TV), nếu không có progressive stream thì fallback sang SoundCloud.
+    """
+    # 1. Thử YouTube
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS_YT) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
             if info and "entries" in info and len(info["entries"]) > 0:
                 v = info["entries"][0]
-                url = v.get("url")
-                if not url and "formats" in v:
-                    for f in reversed(v["formats"]):
-                        if f.get("acodec") != "none" and f.get("url"):
-                            url = f["url"]
-                            break
-                if url:
+                formats = v.get("formats", [])
+                
+                # Lọc format progressive
+                best_fmt = find_best_progressive_audio(formats)
+                if best_fmt and best_fmt.get("url"):
                     return {
                         "source": "youtube",
                         "id": v.get("id"),
                         "title": v.get("title"),
                         "duration": v.get("duration"),
-                        "url": url
+                        "format_id": best_fmt.get("format_id"),
+                        "ext": best_fmt.get("ext"),
+                        "bitrate": best_fmt.get("abr") or best_fmt.get("tbr"),
+                        "protocol": best_fmt.get("protocol"),
+                        "url": best_fmt.get("url")
                     }
     except Exception as e:
         logger.warning(f"YouTube extract failed: {e}")
 
-    # 2. Fallback sang SoundCloud (100% không bị chặn IP datacenter)
+    # 2. Fallback sang SoundCloud (Nổi tiếng với luồng http_mp3_128 progressive chuẩn)
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS_SC) as ydl:
             info = ydl.extract_info(f"scsearch1:{query}", download=False)
             if info and "entries" in info and len(info["entries"]) > 0:
                 v = info["entries"][0]
-                url = v.get("url")
-                if url:
+                formats = v.get("formats", [])
+                
+                # Lọc format progressive (đặc biệt là http_mp3_128)
+                best_fmt = find_best_progressive_audio(formats)
+                if best_fmt and best_fmt.get("url"):
                     return {
                         "source": "soundcloud",
                         "id": v.get("id"),
                         "title": v.get("title"),
                         "duration": v.get("duration"),
-                        "url": url
+                        "format_id": best_fmt.get("format_id"),
+                        "ext": best_fmt.get("ext"),
+                        "bitrate": best_fmt.get("abr") or best_fmt.get("tbr") or 128,
+                        "protocol": best_fmt.get("protocol"),
+                        "url": best_fmt.get("url")
                     }
     except Exception as e:
         logger.error(f"SoundCloud extract failed: {e}")
@@ -84,7 +173,8 @@ def home():
     return {
         "status": "online",
         "service": "Xiaozhi Music API",
-        "version": "1.2.0",
+        "version": "2.0.0",
+        "stream_type": "HTTP Progressive Stream (No HLS / No m3u8)",
         "endpoints": {
             "play_json": "/play?q=tên_bài_hát",
             "play_stream_redirect": "/redirect?q=tên_bài_hát"
@@ -93,13 +183,13 @@ def home():
 
 @app.get("/play")
 def play_json(q: str = Query(..., description="Tên bài hát cần tìm")):
-    """Trả về thông tin bài hát và direct stream URL dưới dạng JSON"""
+    """Trả về thông tin bài hát và direct progressive stream URL dưới dạng JSON"""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Vui lòng nhập tên bài hát")
     
     result = extract_music(q)
     if not result or not result.get("url"):
-        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát")
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát có luồng HTTP liên tục phù hợp")
     
     return {
         "status": "success",
@@ -108,14 +198,15 @@ def play_json(q: str = Query(..., description="Tên bài hát cần tìm")):
 
 @app.get("/redirect")
 def play_redirect(q: str = Query(..., description="Tên bài hát cần tìm")):
-    """Redirect thẳng 302 sang stream audio - Dành cho ESP32 connecttohost"""
+    """Redirect thẳng 302 sang stream MP3/AAC liên tục - Dành cho ESP32 connecttohost"""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Vui lòng nhập tên bài hát")
     
     result = extract_music(q)
     if not result or not result.get("url"):
-        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát")
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát có luồng HTTP liên tục phù hợp")
     
+    # 302 redirect thẳng sang direct progressive stream
     return RedirectResponse(url=result["url"], status_code=302)
 
 if __name__ == "__main__":
