@@ -4,6 +4,9 @@ on:
   schedule:
     # Ping cứ mỗi 10 phút một lần để chống Render Free ngủ đông
     - cron: '*/10 * * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
