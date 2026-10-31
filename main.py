@@ -1,63 +1,98 @@
-﻿from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse, JSONResponse
 import yt_dlp
+import logging
 
-app = FastAPI(title="Xiaozhi Music API")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("xiaozhi-music-api")
 
-@app.get("/")
-def read_root():
-    return {"status": "ok", "message": "Xiaozhi Music API is running"}
+app = FastAPI(
+    title="Xiaozhi Music API",
+    description="API tìm kiếm và bóc tách stream âm thanh YouTube cho ESP32 Xiaozhi Robot",
+    version="1.0.0"
+)
 
-@app.get("/get_music")
-def get_music(q: str):
-    if not q:
-        raise HTTPException(status_code=400, detail="Thieu ten bai hat")
+# Cấu hình yt-dlp tối ưu cho bóc tách audio nhanh
+YDL_OPTS = {
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "extract_flat": False,
+    "skip_download": True,
+}
 
-    ydl_opts = {
-        'format': 'ba/b',
-        'default_search': 'ytsearch1:',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-    }
-
+def extract_youtube_audio(query: str):
+    """Tìm kiếm YouTube và trích xuất direct stream audio URL"""
+    search_query = f"ytsearch1:{query}"
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{q}", download=False)
-            if 'entries' in info and info['entries']:
-                info = info['entries'][0]
-
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            if not info or "entries" not in info or len(info["entries"]) == 0:
+                return None
+            
+            video = info["entries"][0]
+            audio_url = video.get("url")
+            
+            # Nếu format chưa có direct url, tìm trong formats
+            if not audio_url and "formats" in video:
+                for fmt in reversed(video["formats"]):
+                    if fmt.get("acodec") != "none" and fmt.get("url"):
+                        audio_url = fmt["url"]
+                        break
+            
             return {
-                "status": "success",
-                "title": info.get("title"),
-                "duration": info.get("duration"),
-                "url": info.get("url")
+                "id": video.get("id"),
+                "title": video.get("title"),
+                "duration": video.get("duration"),
+                "uploader": video.get("uploader"),
+                "url": audio_url
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error extracting audio for '{query}': {e}")
+        return None
 
-@app.get("/play")
-def play(q: str):
-    if not q:
-        raise HTTPException(status_code=400, detail="Thieu ten bai hat")
-
-    ydl_opts = {
-        'format': 'ba/b',
-        'default_search': 'ytsearch1:',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "service": "Xiaozhi Music API",
+        "endpoints": {
+            "play_json": "/play?q=tên_bài_hát",
+            "play_stream_redirect": "/redirect?q=tên_bài_hát"
+        }
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{q}", download=False)
-            if 'entries' in info and info['entries']:
-                info = info['entries'][0]
+@app.get("/play")
+def play_json(q: str = Query(..., description="Tên bài hát cần tìm")):
+    """Trả về thông tin bài hát và direct stream URL dưới dạng JSON"""
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Vui lòng nhập tên bài hát")
+    
+    result = extract_youtube_audio(q)
+    if not result or not result.get("url"):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát trên YouTube")
+    
+    return {
+        "status": "success",
+        "data": result
+    }
 
-            audio_url = info.get("url")
-            if not audio_url:
-                raise HTTPException(status_code=404, detail="Audio not found")
-            return RedirectResponse(url=audio_url, status_code=302)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/redirect")
+def play_redirect(q: str = Query(..., description="Tên bài hát cần tìm")):
+    """Redirect thẳng 302 sang stream audio - Dành cho ESP32 connecttohost"""
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Vui lòng nhập tên bài hát")
+    
+    result = extract_youtube_audio(q)
+    if not result or not result.get("url"):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài hát trên YouTube")
+    
+    # 302 redirect trực tiếp đến luồng audio googlevideo
+    return RedirectResponse(url=result["url"], status_code=302)
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
