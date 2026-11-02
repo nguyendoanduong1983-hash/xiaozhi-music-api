@@ -2,8 +2,8 @@ name: Keep Alive Render Music API
 
 on:
   schedule:
-    # Ping cứ mỗi 10 phút một lần để chống Render Free ngủ đông
-    - cron: '*/10 * * * *'
+    # Ping cứ mỗi 5 phút một lần để chống Render Free ngủ đông
+    - cron: '*/5 * * * *'
   push:
     branches:
       - main
