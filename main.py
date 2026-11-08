@@ -17,6 +17,8 @@ app = FastAPI(
     version="2.2.0"
 )
 
+COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
 # Cấu hình yt-dlp cho YouTube: Không ép format cố định ở cấp options để tránh DownloadError
 YDL_OPTS_YT = {
     "noplaylist": True,
@@ -29,6 +31,9 @@ YDL_OPTS_YT = {
         }
     }
 }
+if os.path.exists(COOKIE_FILE):
+    YDL_OPTS_YT["cookiefile"] = COOKIE_FILE
+    logger.info("Loaded YouTube cookie authentication: cookies.txt")
 
 # Cấu hình yt-dlp cho SoundCloud: Lấy toàn bộ formats để phân tích và lọc bằng code
 YDL_OPTS_SC = {
@@ -223,6 +228,24 @@ def extract_music(query: str, request: Request = None):
                         "protocol": best_fmt.get("protocol"),
                         "stream_type": "direct_progressive",
                         "url": best_fmt.get("url")
+                    }
+
+                # 1.2 Nếu YouTube chỉ có HLS (m3u8), tự động định tuyến qua server stream proxy
+                hls_url = get_hls_fallback_url(formats)
+                if hls_url:
+                    encoded_hls = urllib.parse.quote(hls_url, safe="")
+                    proxy_stream_url = f"{base_host}/stream?m3u8={encoded_hls}"
+                    return {
+                        "source": "youtube_hls_proxied",
+                        "id": v.get("id"),
+                        "title": v.get("title"),
+                        "duration": v.get("duration"),
+                        "format_id": "progressive_stream_proxy",
+                        "ext": "aac",
+                        "bitrate": 128,
+                        "protocol": "https_continuous_chunked",
+                        "stream_type": "server_progressive_stream",
+                        "url": proxy_stream_url
                     }
     except Exception as e:
         logger.warning(f"YouTube extract failed: {e}")
