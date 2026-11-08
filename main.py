@@ -28,7 +28,7 @@ YDL_OPTS_YT = {
     "skip_download": True,
     "extractor_args": {
         "youtube": {
-            "player_client": ["ios", "mweb"]
+            "player_client": ["tv_embedded", "tv", "ios"]
         }
     }
 }
