@@ -42,6 +42,7 @@ YDL_OPTS_SC = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
+    "ignoreerrors": True,
 }
 
 def is_hls_or_manifest(url: str, proto: str) -> bool:
@@ -253,16 +254,29 @@ def extract_music(query: str, request: Request = None):
     except Exception as e:
         logger.warning(f"YouTube extract failed: {e}")
 
-    # 2. Thử SoundCloud
+    # 2. Thử SoundCloud (Duyệt top 5 bài, bỏ qua DRM và bản preview để lấy đúng bài đầy đủ)
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS_SC) as ydl:
-            info = ydl.extract_info(f"scsearch1:{query}", download=False)
-            if info and "entries" in info and len(info["entries"]) > 0:
-                v = info["entries"][0]
+            info = ydl.extract_info(f"scsearch5:{query}", download=False)
+            entries = info.get("entries", []) if info else []
+            for v in entries:
+                if not v:
+                    continue
                 formats = v.get("formats", [])
+                
+                # Bỏ qua các định dạng preview giới hạn hoặc không có audio
+                playable_fmts = [
+                    f for f in formats 
+                    if not f.get("has_drm") 
+                    and "preview" not in (f.get("format_id") or "").lower() 
+                    and f.get("acodec") != "none"
+                ]
+                if not playable_fmts:
+                    # Nếu bài này chỉ có preview hoặc bị khóa bản quyền, thử tiếp bài kế tiếp trong top 5
+                    continue
 
-                # 2.1 Tìm format progressive (ví dụ direct http_mp3)
-                best_fmt = find_best_progressive_audio(formats)
+                # 2.1 Tìm format progressive trực tiếp (ví dụ direct http_mp3)
+                best_fmt = find_best_progressive_audio(playable_fmts)
                 if best_fmt and best_fmt.get("url"):
                     return {
                         "source": "soundcloud",
@@ -278,8 +292,7 @@ def extract_music(query: str, request: Request = None):
                     }
 
                 # 2.2 Nếu SoundCloud chỉ có HLS (m3u8), tự động định tuyến qua server stream proxy
-                # ESP32 sẽ gọi proxy và nhận dòng byte liên tục (không bao giờ thấy file .m3u8)
-                hls_url = get_hls_fallback_url(formats)
+                hls_url = get_hls_fallback_url(playable_fmts)
                 if hls_url:
                     encoded_hls = urllib.parse.quote(hls_url, safe="")
                     proxy_stream_url = f"{base_host}/stream?m3u8={encoded_hls}"
