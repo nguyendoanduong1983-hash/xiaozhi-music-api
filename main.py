@@ -19,21 +19,22 @@ app = FastAPI(
 
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-# Cấu hình yt-dlp cho YouTube: Không ép format cố định ở cấp options để tránh DownloadError
+# Cấu hình yt-dlp cho YouTube
 YDL_OPTS_YT = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "ios", "tv_embedded", "mweb"]
-        }
-    }
 }
 if os.path.exists(COOKIE_FILE):
     YDL_OPTS_YT["cookiefile"] = COOKIE_FILE
     logger.info("Loaded YouTube cookie authentication: cookies.txt")
+else:
+    YDL_OPTS_YT["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "ios", "tv_embedded", "mweb"]
+        }
+    }
 
 # Cấu hình yt-dlp cho SoundCloud: Lấy toàn bộ formats để phân tích và lọc bằng code
 YDL_OPTS_SC = {
@@ -363,6 +364,31 @@ def stream_audio(m3u8: str = Query(..., description="URL nguồn HLS")):
             "Connection": "keep-alive"
         }
     )
+
+@app.get("/debug")
+def debug(q: str = Query("test")):
+    cookie_exists = os.path.exists(COOKIE_FILE)
+    cookie_size = os.path.getsize(COOKIE_FILE) if cookie_exists else 0
+    yt_err = None
+    yt_entry = None
+    formats_count = 0
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS_YT) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{q}", download=False)
+            if info and "entries" in info and len(info["entries"]) > 0:
+                v = info["entries"][0]
+                yt_entry = {"title": v.get("title"), "id": v.get("id")}
+                formats_count = len(v.get("formats", []))
+    except Exception as e:
+        yt_err = str(e)
+    return {
+        "cookie_file": COOKIE_FILE,
+        "cookie_exists": cookie_exists,
+        "cookie_size": cookie_size,
+        "yt_err": yt_err,
+        "yt_entry": yt_entry,
+        "formats_count": formats_count
+    }
 
 if __name__ == "__main__":
     import uvicorn
