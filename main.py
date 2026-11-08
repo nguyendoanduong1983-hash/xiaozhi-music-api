@@ -14,7 +14,7 @@ logger = logging.getLogger("xiaozhi-music-api")
 app = FastAPI(
     title="Xiaozhi Music API",
     description="API trích xuất luồng âm thanh liên tục (HTTP Progressive Stream) tối ưu cho vi điều khiển ESP32",
-    version="2.2.0"
+    version="2.3.0"
 )
 
 COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
@@ -302,7 +302,7 @@ def home():
     return {
         "status": "online",
         "service": "Xiaozhi Music API",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "stream_type": "HTTP Progressive Stream (No HLS / No m3u8 for ESP32)",
         "endpoints": {
             "play_json": "/play?q=tên_bài_hát",
