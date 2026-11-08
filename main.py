@@ -26,16 +26,15 @@ YDL_OPTS_YT = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["ios", "mweb"]
+        }
+    }
 }
 if os.path.exists(COOKIE_FILE):
     YDL_OPTS_YT["cookiefile"] = COOKIE_FILE
     logger.info("Loaded YouTube cookie authentication: cookies.txt")
-else:
-    YDL_OPTS_YT["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android", "ios", "tv_embedded", "mweb"]
-        }
-    }
 
 # Cấu hình yt-dlp cho SoundCloud: Lấy toàn bộ formats để phân tích và lọc bằng code
 YDL_OPTS_SC = {
