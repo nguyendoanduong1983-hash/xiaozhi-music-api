@@ -21,6 +21,7 @@ COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
 # Cấu hình yt-dlp cho YouTube
 YDL_OPTS_YT = {
+    "format": "all",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
