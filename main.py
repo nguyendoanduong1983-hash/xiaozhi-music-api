@@ -21,7 +21,7 @@ COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
 # Cấu hình yt-dlp cho YouTube
 YDL_OPTS_YT = {
-    "format": "all",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -218,6 +218,8 @@ def extract_music(query: str, request: Request = None):
                 
                 # Duyệt tìm format progressive HTTP/HTTPS
                 best_fmt = find_best_progressive_audio(formats)
+                if not best_fmt and v.get("url") and not is_hls_or_manifest(v.get("url"), v.get("protocol") or ""):
+                    best_fmt = v
                 if best_fmt and best_fmt.get("url"):
                     return {
                         "source": "youtube",
