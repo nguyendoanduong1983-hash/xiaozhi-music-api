@@ -368,14 +368,28 @@ def stream_audio(m3u8: str = Query(..., description="URL nguồn HLS")):
     )
 
 @app.get("/debug")
-def debug(q: str = Query("test")):
+def debug(q: str = Query("test"), client: str = Query("tv_embedded"), use_cookie: bool = Query(False)):
     cookie_exists = os.path.exists(COOKIE_FILE)
     cookie_size = os.path.getsize(COOKIE_FILE) if cookie_exists else 0
     yt_err = None
     yt_entry = None
     formats_count = 0
+    test_opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": [client]
+            }
+        }
+    }
+    if use_cookie and cookie_exists:
+        test_opts["cookiefile"] = COOKIE_FILE
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS_YT) as ydl:
+        with yt_dlp.YoutubeDL(test_opts) as ydl:
             info = ydl.extract_info(f"ytsearch1:{q}", download=False)
             if info and "entries" in info and len(info["entries"]) > 0:
                 v = info["entries"][0]
@@ -384,6 +398,8 @@ def debug(q: str = Query("test")):
     except Exception as e:
         yt_err = str(e)
     return {
+        "client": client,
+        "use_cookie": use_cookie,
         "cookie_file": COOKIE_FILE,
         "cookie_exists": cookie_exists,
         "cookie_size": cookie_size,
